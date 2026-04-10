@@ -101,6 +101,127 @@ class HandTracker:
         }
 
         self.prev_time = 0
+        self.state = "IDLE"
+        self.start_point = None
+        self.traces = {}
+
+    def detect_gesture(self, results):
+        """
+        Détecte les gestes de la main.
+        
+        Returns:
+            state: 'PINCH', 'GRAB', ou 'IDLE'
+        """
+        if not results.hand_landmarks:
+            self.state = "IDLE"
+            return self.state
+        
+        hand_landmarks = results.hand_landmarks[0]
+        h, w = 1.0, 1.0
+        
+        landmarks = {
+            i: (hand_landmarks[i].x, hand_landmarks[i].y, hand_landmarks[i].z) 
+            for i in range(21)
+        }
+        
+        thumb_tip = landmarks[4]
+        index_tip = landmarks[8]
+        middle_tip = landmarks[12]
+        ring_tip = landmarks[16]
+        pinky_tip = landmarks[20]
+        wrist = landmarks[0]
+        
+        pinch_dist = ((thumb_tip[0] - index_tip[0])**2 + (thumb_tip[1] - index_tip[1])**2) ** 0.5
+        pinch_threshold = 0.05
+        
+        if pinch_dist < pinch_threshold:
+            self.state = "PINCH"
+            return self.state
+        
+        fingertips = [thumb_tip, index_tip, middle_tip, ring_tip, pinky_tip]
+        distances = []
+        for i in range(len(fingertips) - 1):
+            d = ((fingertips[i][0] - fingertips[i+1][0])**2 + (fingertips[i][1] - fingertips[i+1][1])**2) ** 0.5
+            distances.append(d)
+        
+        avg_tip_dist = sum(distances) / len(distances)
+        tip_dist_threshold = 0.08
+        
+        if avg_tip_dist < tip_dist_threshold:
+            self.state = "GRAB"
+            return self.state
+        
+        self.state = "IDLE"
+        return self.state
+
+    def update_traces(self, frame, results):
+        """
+        Met à jour les tracés en fonction de l'état.
+        
+        PINCH = trace bleu, GRAB = trace rouge
+        """
+        h, w, _ = frame.shape
+        
+        if results.hand_landmarks:
+            hand_landmarks = results.hand_landmarks[0]
+            wrist = hand_landmarks[0]
+            cx, cy = int(wrist.x * w), int(wrist.y * h)
+            
+            if self.state == "PINCH":
+                if self.start_point is None:
+                    self.start_point = (cx, cy)
+                    self.traces["pinch"] = [(cx, cy)]
+                else:
+                    dx = cx - self.start_point[0]
+                    dy = cy - self.start_point[1]
+                    if (dx**2 + dy**2) ** 0.5 > 5:
+                        if "pinch" not in self.traces:
+                            self.traces["pinch"] = []
+                        self.traces["pinch"].append((cx, cy))
+                        self.start_point = (cx, cy)
+                        if len(self.traces["pinch"]) > 50:
+                            self.traces["pinch"].pop(0)
+            
+            elif self.state == "GRAB":
+                if self.start_point is None:
+                    self.start_point = (cx, cy)
+                    self.traces["grab"] = [(cx, cy)]
+                else:
+                    dx = cx - self.start_point[0]
+                    dy = cy - self.start_point[1]
+                    if (dx**2 + dy**2) ** 0.5 > 5:
+                        if "grab" not in self.traces:
+                            self.traces["grab"] = []
+                        self.traces["grab"].append((cx, cy))
+                        self.start_point = (cx, cy)
+                        if len(self.traces["grab"]) > 50:
+                            self.traces["grab"].pop(0)
+            
+            else:
+                self.start_point = None
+        else:
+            self.start_point = None
+        
+        self.draw_traces(frame)
+        return frame
+
+    def draw_traces(self, frame):
+        """
+        Dessine les tracés sur la frame.
+        """
+        if "pinch" in self.traces and len(self.traces["pinch"]) > 1:
+            for i in range(1, len(self.traces["pinch"])):
+                pt1 = self.traces["pinch"][i-1]
+                pt2 = self.traces["pinch"][i]
+                cv2.line(frame, pt1, pt2, (255, 0, 0), 3, cv2.LINE_AA)
+        
+        if "grab" in self.traces and len(self.traces["grab"]) > 1:
+            for i in range(1, len(self.traces["grab"])):
+                pt1 = self.traces["grab"][i-1]
+                pt2 = self.traces["grab"][i]
+                cv2.line(frame, pt1, pt2, (0, 0, 255), 3, cv2.LINE_AA)
+        
+        return frame
 
     def find_hands(self, frame):
         """
@@ -217,6 +338,10 @@ class HandTracker:
         cv2.putText(frame, f"Mains detectees: {num_hands}", (20, 60),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
+        # State (PINCH/GRAB/IDLE)
+        cv2.putText(frame, f"State: {self.state}", (20, 85),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+
         # Légende des couleurs
         y_offset = 85
         for finger, color in self.finger_colors.items():
@@ -283,6 +408,12 @@ def main():
 
         # Détection des mains
         results = tracker.find_hands(frame)
+        
+        # Détection du geste
+        state = tracker.detect_gesture(results)
+        
+        # Mise à jour des tracés
+        tracker.update_traces(frame, results)
 
         # Dessiner les bones
         if use_custom_style:
